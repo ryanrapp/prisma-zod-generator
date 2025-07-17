@@ -92,17 +92,35 @@ export default class Transformer {
   }
 
   async generateObjectSchema() {
-    const zodObjectSchemaFields = this.generateObjectSchemaFields();
-    const objectSchema = this.prepareObjectSchema(zodObjectSchemaFields);
-    const objectSchemaName = this.resolveObjectSchemaName();
+    try {
+      console.log(`  generateObjectSchema: Starting for ${this.name}`);
+      const zodObjectSchemaFields = this.generateObjectSchemaFields();
+      console.log(
+        `  generateObjectSchema: Generated ${zodObjectSchemaFields.length} fields for ${this.name}`,
+      );
 
-    await writeFileSafely(
-      path.join(
+      const objectSchema = this.prepareObjectSchema(zodObjectSchemaFields);
+      console.log(
+        `  generateObjectSchema: Prepared schema for ${this.name}, length: ${objectSchema.length}`,
+      );
+
+      const objectSchemaName = this.resolveObjectSchemaName();
+      console.log(`  generateObjectSchema: Schema name: ${objectSchemaName}`);
+
+      const outputPath = path.join(
         Transformer.outputPath,
         `schemas/objects/${objectSchemaName}.schema.ts`,
-      ),
-      objectSchema,
-    );
+      );
+      console.log(`  generateObjectSchema: Writing to ${outputPath}`);
+
+      await writeFileSafely(outputPath, objectSchema);
+      console.log(
+        `  generateObjectSchema: Successfully wrote schema for ${this.name}`,
+      );
+    } catch (error) {
+      console.error(`Error generating object schema for ${this.name}:`, error);
+      throw error;
+    }
   }
 
   generateObjectSchemaFields() {
@@ -124,89 +142,196 @@ export default class Transformer {
   generateObjectSchemaField(
     field: PrismaDMMF.SchemaArg,
   ): [string, PrismaDMMF.SchemaArg, boolean][] {
-    let lines = field.inputTypes;
+    try {
+      let lines = field.inputTypes;
 
-    if (lines.length === 0) {
-      return [];
-    }
+      if (lines.length === 0) {
+        return [];
+      }
 
-    let alternatives = lines.reduce<string[]>((result, inputType) => {
-      if (inputType.type === 'String') {
-        result.push(this.wrapWithZodValidators('z.string()', field, inputType));
-      } else if (
-        inputType.type === 'Int' ||
-        inputType.type === 'Float' ||
-        inputType.type === 'Decimal'
-      ) {
-        result.push(this.wrapWithZodValidators('z.number()', field, inputType));
-      } else if (inputType.type === 'BigInt') {
-        result.push(this.wrapWithZodValidators('z.bigint()', field, inputType));
-      } else if (inputType.type === 'Boolean') {
-        result.push(
-          this.wrapWithZodValidators('z.boolean()', field, inputType),
-        );
-      } else if (inputType.type === 'DateTime') {
-        result.push(
-          this.wrapWithZodValidators('z.coerce.date()', field, inputType),
-        );
-      } else if (inputType.type === 'Json') {
-        this.hasJson = true;
+      // Special handling for filter fields that should not create unions
+      const isFilterField = this.isFilterField(field.name);
+      // Special handling for relation filter fields that should be optional, not nullable
+      const isRelationFilterField = this.isRelationFilterField(field.name);
 
-        result.push(this.wrapWithZodValidators('jsonSchema', field, inputType));
-      } else if (inputType.type === 'True') {
-        result.push(
-          this.wrapWithZodValidators('z.literal(true)', field, inputType),
-        );
-      } else if (inputType.type === 'Bytes') {
-        result.push(
-          this.wrapWithZodValidators('z.instanceof(Buffer)', field, inputType),
-        );
-      } else {
-        const isEnum = inputType.location === 'enumTypes';
-
-        if (inputType.namespace === 'prisma' || isEnum) {
-          if (
-            inputType.type !== this.name &&
-            typeof inputType.type === 'string'
+      let alternatives = lines.reduce<string[]>((result, inputType) => {
+        try {
+          if (inputType.type === 'String') {
+            result.push(
+              this.wrapWithZodValidators('z.string()', field, inputType),
+            );
+          } else if (
+            inputType.type === 'Int' ||
+            inputType.type === 'Float' ||
+            inputType.type === 'Decimal'
           ) {
-            this.addSchemaImport(inputType.type);
-          }
+            result.push(
+              this.wrapWithZodValidators('z.number()', field, inputType),
+            );
+          } else if (inputType.type === 'BigInt') {
+            result.push(
+              this.wrapWithZodValidators('z.bigint()', field, inputType),
+            );
+          } else if (inputType.type === 'Boolean') {
+            result.push(
+              this.wrapWithZodValidators('z.boolean()', field, inputType),
+            );
+          } else if (inputType.type === 'DateTime') {
+            result.push(
+              this.wrapWithZodValidators('z.coerce.date()', field, inputType),
+            );
+          } else if (inputType.type === 'Json') {
+            this.hasJson = true;
 
-          result.push(
-            this.generatePrismaStringLine(field, inputType, lines.length),
+            result.push(
+              this.wrapWithZodValidators('jsonSchema', field, inputType),
+            );
+          } else if (inputType.type === 'True') {
+            result.push(
+              this.wrapWithZodValidators('z.literal(true)', field, inputType),
+            );
+          } else if (inputType.type === 'Bytes') {
+            result.push(
+              this.wrapWithZodValidators(
+                'z.instanceof(Buffer)',
+                field,
+                inputType,
+              ),
+            );
+          } else {
+            const isEnum = inputType.location === 'enumTypes';
+
+            if (inputType.namespace === 'prisma' || isEnum) {
+              if (
+                inputType.type !== this.name &&
+                typeof inputType.type === 'string'
+              ) {
+                this.addSchemaImport(inputType.type);
+              }
+
+              result.push(
+                this.generatePrismaStringLine(field, inputType, lines.length),
+              );
+            }
+          }
+        } catch (error) {
+          console.error(
+            `Error processing inputType for field ${field.name}:`,
+            inputType,
+            error,
           );
+          throw error;
+        }
+
+        return result;
+      }, []);
+
+      if (alternatives.length === 0) {
+        return [];
+      }
+
+      // For filter fields, prefer array types over single types
+      if (isFilterField && alternatives.length > 1) {
+        // Find array alternatives first
+        const arrayAlternatives = alternatives.filter((alt) =>
+          alt.includes('.array()'),
+        );
+        if (arrayAlternatives.length > 0) {
+          alternatives = arrayAlternatives;
         }
       }
 
-      return result;
-    }, []);
+      if (alternatives.length > 1) {
+        alternatives = alternatives.map((alter) =>
+          alter.replace('.optional()', ''),
+        );
+      }
 
-    if (alternatives.length === 0) {
-      return [];
-    }
+      const fieldName = alternatives.some((alt) => alt.includes(':'))
+        ? ''
+        : `  ${field.name}:`;
 
-    if (alternatives.length > 1) {
-      alternatives = alternatives.map((alter) =>
-        alter.replace('.optional()', ''),
+      // Only .optional() for relation filter fields, not .nullable()
+      let opt = '';
+      if (!field.isRequired) {
+        if (isRelationFilterField) {
+          opt = '.optional()';
+        } else if (field.isNullable) {
+          opt = '.nullable()';
+        } else {
+          opt = '.optional()';
+        }
+      } else if (field.isNullable) {
+        opt = '.nullable()';
+      }
+
+      let resString =
+        alternatives.length === 1
+          ? alternatives.join(', ') + opt
+          : `z.union([${alternatives.join(', ')}])${opt}`;
+
+      // Remove .nullable() for relation filter fields
+      if (isRelationFilterField) {
+        resString = resString.replace('.nullable()', '');
+      }
+
+      // Cast the entire field to the correct Prisma type if it's an input object type
+      const fieldInputTypes = field.inputTypes.filter(
+        (inputType) => inputType.location === 'inputObjectTypes',
       );
+      if (fieldInputTypes.length > 0 && alternatives.length > 1) {
+        // For unions with input object types, cast the entire union
+        let unionType = fieldInputTypes[0].type as string; // Use the first input type as the union type
+
+        // Fix for relation filter types that don't exist in current Prisma versions
+        if (unionType.endsWith('RelationFilter')) {
+          // Extract the model name from the relation filter type
+          // e.g., "UserRelationFilter" -> "User"
+          const modelName = unionType.replace(/RelationFilter$/, '');
+          unionType = `${modelName}WhereInput`;
+        } else if (unionType.endsWith('ListRelationFilter')) {
+          // Extract the model name from the list relation filter type
+          // e.g., "MemoryListRelationFilter" -> "Memory"
+          const modelName = unionType.replace(/ListRelationFilter$/, '');
+          unionType = `${modelName}WhereInput`;
+        }
+
+        resString = `(${resString}) as z.ZodType<Prisma.${unionType}>`;
+      }
+
+      return [[`  ${fieldName} ${resString} `, field, true]];
+    } catch (error) {
+      console.error(
+        `Error generating object schema field ${field.name}:`,
+        error,
+      );
+      throw error;
     }
+  }
 
-    const fieldName = alternatives.some((alt) => alt.includes(':'))
-      ? ''
-      : `  ${field.name}:`;
+  // Helper method to identify filter fields that should not create unions
+  isFilterField(fieldName: string): boolean {
+    const filterFieldNames = [
+      'in',
+      'notIn',
+      'equals',
+      'not',
+      'lt',
+      'lte',
+      'gt',
+      'gte',
+      'contains',
+      'startsWith',
+      'endsWith',
+      'mode',
+      'path',
+    ];
+    return filterFieldNames.includes(fieldName);
+  }
 
-    const opt = !field.isRequired ? '.optional()' : '';
-
-    let resString =
-      alternatives.length === 1
-        ? alternatives.join(',\r\n')
-        : `z.union([${alternatives.join(',\r\n')}])${opt}`;
-
-    if (field.isNullable) {
-      resString += '.nullable()';
-    }
-
-    return [[`  ${fieldName} ${resString} `, field, true]];
+  // Helper method to identify relation filter fields that should be optional, not nullable
+  isRelationFilterField(fieldName: string): boolean {
+    return fieldName === 'is' || fieldName === 'isNot';
   }
 
   wrapWithZodValidators(
@@ -237,30 +362,75 @@ export default class Transformer {
     inputType: PrismaDMMF.SchemaArgInputType,
     inputsLength: number,
   ) {
-    const isEnum = inputType.location === 'enumTypes';
+    try {
+      const isEnum = inputType.location === 'enumTypes';
 
-    const { isModelQueryType, modelName, queryName } =
-      this.checkIsModelQueryType(inputType.type as string);
+      const { isModelQueryType, modelName, queryName } =
+        this.checkIsModelQueryType(inputType.type as string);
 
-    let objectSchemaLine = isModelQueryType
-      ? this.resolveModelQuerySchemaName(modelName!, queryName!)
-      : `${inputType.type}ObjectSchema`;
-    let enumSchemaLine = `${inputType.type}Schema`;
+      // Fix for relation filter types that don't exist in current Prisma versions
+      let typeName = inputType.type as string;
+      let schemaName = inputType.type as string;
 
-    const schema =
-      inputType.type === this.name
-        ? objectSchemaLine
-        : isEnum
-        ? enumSchemaLine
-        : objectSchemaLine;
+      // Check if this is a relation filter type and replace with WhereInput
+      if (typeName.endsWith('RelationFilter')) {
+        // Extract the model name from the relation filter type
+        // e.g., "UserRelationFilter" -> "User"
+        const modelName = typeName.replace(/RelationFilter$/, '');
+        typeName = `${modelName}WhereInput`;
+        schemaName = `${modelName}WhereInput`;
+      } else if (typeName.endsWith('ListRelationFilter')) {
+        // Extract the model name from the list relation filter type
+        // e.g., "MemoryListRelationFilter" -> "Memory"
+        const modelName = typeName.replace(/ListRelationFilter$/, '');
+        typeName = `${modelName}WhereInput`;
+        schemaName = `${modelName}WhereInput`;
+      }
 
-    const arr = inputType.isList ? '.array()' : '';
+      let objectSchemaLine = isModelQueryType
+        ? this.resolveModelQuerySchemaName(modelName!, queryName!)
+        : `${schemaName}ObjectSchema`;
+      let enumSchemaLine = `${schemaName}Schema`;
 
-    const opt = !field.isRequired ? '.optional()' : '';
+      const schema =
+        schemaName === this.name
+          ? objectSchemaLine
+          : isEnum
+          ? enumSchemaLine
+          : objectSchemaLine;
 
-    return inputsLength === 1
-      ? `  ${field.name}: z.lazy(() => ${schema})${arr}${opt}`
-      : `z.lazy(() => ${schema})${arr}${opt}`;
+      const arr = inputType.isList ? '.array()' : '';
+
+      const opt = !field.isRequired ? '.optional()' : '';
+
+      // Always apply type casting for input object types
+      const isInputObjectType = inputType.location === 'inputObjectTypes';
+      const typeCast = isInputObjectType
+        ? ` as z.ZodType<Prisma.${typeName}${inputType.isList ? '[]' : ''}>`
+        : '';
+
+      const lazyExpr = `z.lazy(() => ${schema})${arr}${typeCast}`;
+
+      // Always apply type casting for input object types, regardless of union or single
+      if (isInputObjectType) {
+        const result =
+          inputsLength === 1
+            ? `  ${field.name}: (${lazyExpr})${opt}`
+            : `(${lazyExpr})`;
+        return result;
+      } else {
+        // For non-input object types (enums, etc.), don't apply type casting
+        const result =
+          inputsLength === 1 ? `  ${field.name}: ${lazyExpr}${opt}` : lazyExpr;
+        return result;
+      }
+    } catch (error) {
+      console.error(
+        `Error generating Prisma string line for field ${field.name}:`,
+        error,
+      );
+      throw error;
+    }
   }
 
   generateFieldValidators(
@@ -408,9 +578,7 @@ export default class Transformer {
     let wrapped = '';
 
     wrapped += 'z.union([';
-    wrapped += '\n';
-    wrapped += '  ' + zodStringFields.join(',');
-    wrapped += '\n';
+    wrapped += zodStringFields.join(', ');
     wrapped += '])';
     return wrapped;
   }
@@ -420,7 +588,13 @@ export default class Transformer {
 
     wrapped += 'z.object({';
     wrapped += '\n';
-    wrapped += '  ' + zodStringFields;
+    if (Array.isArray(zodStringFields)) {
+      // Remove any trailing commas from each field string
+      const cleanedFields = zodStringFields.map((f) => f.replace(/,+\s*$/, ''));
+      wrapped += '  ' + cleanedFields.join(',\n  ');
+    } else {
+      wrapped += '  ' + zodStringFields.replace(/,+\s*$/, '');
+    }
     wrapped += '\n';
     wrapped += '})';
     return wrapped;

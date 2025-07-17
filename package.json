@@ -7,9 +7,12 @@
     "prisma-zod-generator": "lib/generator.js"
   },
   "scripts": {
+    "build": "tsc",
     "gen-example": "tsc && npx prisma generate",
     "check-uncommitted": "git diff-index --quiet HEAD --",
-    "package:publish": "npm update && npm run check-uncommitted && ./package.sh && cd package && npm publish"
+    "test:format": "npm run gen-example && node -e \"const fs = require('fs'); const path = require('path'); const outputDir = path.join('prisma', 'generated', 'schemas', 'objects'); if (!fs.existsSync(outputDir) || fs.readdirSync(outputDir).length === 0) { console.error('No files generated in', outputDir); process.exit(1); } console.log('Generated files:', fs.readdirSync(outputDir).length);\" && tsc --noEmit --project prisma/generated/tsconfig.json",
+    "test:compile": "npm run gen-example && tsc --noEmit --project prisma/generated/tsconfig.json",
+    "test": "npm run test:format"
   },
   "author": {
     "name": "Omar Dulaimi",

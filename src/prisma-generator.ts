@@ -2,15 +2,16 @@ import {
   DMMF,
   EnvValue,
   GeneratorConfig,
-  GeneratorOptions
+  GeneratorOptions,
 } from '@prisma/generator-helper';
 import { getDMMF, parseEnvValue } from '@prisma/internals';
 import { promises as fs } from 'fs';
+import path from 'path';
 import {
   addMissingInputObjectTypes,
   hideInputObjectTypesAndRelatedFields,
   resolveAddMissingInputObjectTypeOptions,
-  resolveModelsComments
+  resolveModelsComments,
 } from './helpers';
 import { resolveAggregateOperationSupport } from './helpers/aggregate-helpers';
 import Transformer from './transformer';
@@ -56,7 +57,7 @@ export async function generate(options: GeneratorOptions) {
     const dataSource = options.datasources?.[0];
     const previewFeatures = prismaClientGeneratorConfig?.previewFeatures;
     Transformer.provider = dataSource.provider;
-    Transformer.previewFeatures = previewFeatures
+    Transformer.previewFeatures = previewFeatures;
 
     const generatorConfigOptions = options.generator.config;
 
@@ -101,6 +102,43 @@ async function handleGeneratorOutputValue(generatorOutputValue: EnvValue) {
   await removeDir(outputDirectoryPath, isRemoveContentsOnly);
 
   Transformer.setOutputPath(outputDirectoryPath);
+
+  // Create tsconfig.json for TypeScript validation
+  await createTsConfig(outputDirectoryPath);
+}
+
+async function createTsConfig(outputDirectoryPath: string) {
+  const tsConfigPath = path.join(outputDirectoryPath, 'tsconfig.json');
+  const tsConfigContent = JSON.stringify(
+    {
+      compilerOptions: {
+        target: 'ES2020',
+        module: 'ESNext',
+        moduleResolution: 'node',
+        esModuleInterop: true,
+        allowSyntheticDefaultImports: true,
+        strict: true,
+        skipLibCheck: true,
+        forceConsistentCasingInFileNames: true,
+        declaration: false,
+        outDir: './dist',
+        rootDir: './',
+        baseUrl: './',
+        paths: {
+          '@prisma/client': [
+            '../../../../node_modules/.pnpm/@prisma+client@4.16.2_prisma@4.16.2/node_modules/@prisma/client',
+          ],
+        },
+      },
+      include: ['schemas/**/*.ts'],
+      exclude: ['node_modules', 'dist'],
+    },
+    null,
+    2,
+  );
+
+  await fs.writeFile(tsConfigPath, tsConfigContent);
+  console.log(`Created tsconfig.json at ${tsConfigPath}`);
 }
 
 function getGeneratorConfigByProvider(
@@ -134,12 +172,32 @@ async function generateEnumSchemas(
 }
 
 async function generateObjectSchemas(inputObjectTypes: DMMF.InputType[]) {
+  console.log(`Starting to generate ${inputObjectTypes.length} object schemas`);
+
   for (let i = 0; i < inputObjectTypes.length; i += 1) {
-    const fields = inputObjectTypes[i]?.fields;
-    const name = inputObjectTypes[i]?.name;
-    const transformer = new Transformer({ name, fields });
-    await transformer.generateObjectSchema();
+    try {
+      const fields = inputObjectTypes[i]?.fields;
+      const name = inputObjectTypes[i]?.name;
+
+      console.log(
+        `Processing object schema ${i + 1}/${
+          inputObjectTypes.length
+        }: ${name} with ${fields?.length || 0} fields`,
+      );
+
+      const transformer = new Transformer({ name, fields });
+      await transformer.generateObjectSchema();
+      console.log(`Successfully generated schema for: ${name}`);
+    } catch (error) {
+      console.error(
+        `Error generating object schema ${i + 1}/${inputObjectTypes.length}:`,
+        error,
+      );
+      throw error;
+    }
   }
+
+  console.log('Finished generating object schemas');
 }
 
 async function generateModelSchemas(
